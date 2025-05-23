@@ -1,0 +1,414 @@
+import { useState, useMemo, useRef } from "react"
+import { Input } from "@/components/ui/input"
+import { Card, CardContent } from "@/components/ui/card"
+import { Select, SelectTrigger, SelectContent, SelectItem, SelectValue } from "@/components/ui/select"
+import pdfParse from 'pdf-parse'
+import jsPDF from 'jspdf'
+import html2canvas from 'html2canvas'
+
+const drugData = {
+  "azatioprina": {
+    first: "✅ Compatible",
+    second: "✅ Compatible",
+    third: "✅ Compatible",
+    notes: "Puede usarse durante todo el embarazo."
+  },
+  "metotrexato": {
+    first: "❌ No compatible",
+    second: "❌ No compatible",
+    third: "❌ No compatible",
+    notes: "Debe suspenderse antes del embarazo. Teratogénico."
+  },
+  "aine": {
+    first: "✅ Uso corto compatible",
+    second: "⚠️ Hasta semana 28",
+    third: "❌ No compatible",
+    notes: "Suspender después de la semana 28 por riesgo de cierre del ductus arterioso."
+  },
+  "prednisona": {
+    first: "✅ Compatible",
+    second: "✅ Compatible",
+    third: "✅ Compatible",
+    notes: "Idealmente ≤5 mg/día."
+  },
+  "certolizumab": {
+    first: "✅ Compatible",
+    second: "✅ Compatible",
+    third: "✅ Compatible",
+    notes: "No requiere suspensión. No se transfiere al feto."
+  },
+  "infliximab": {
+    first: "✅ Compatible",
+    second: "✅ Compatible",
+    third: "⚠️ Suspender antes de semana 20",
+    notes: "Transferencia transplacentaria alta en 3er trimestre."
+  },
+  "leflunomida": {
+    first: "❌ No compatible",
+    second: "❌ No compatible",
+    third: "❌ No compatible",
+    notes: "Requiere lavado con colestiramina."
+  },
+  "anakinra": {
+    first: "✅ Compatible si necesario",
+    second: "✅ Compatible si necesario",
+    third: "✅ Compatible si necesario",
+    notes: "Puede utilizarse en enfermedad activa."
+  }
+}
+
+// Sinónimos y nombres alternativos para medicamentos
+const drugSynonyms = {
+  "azatioprina": ["imuran", "azasan", "imurel"],
+  "metotrexato": ["mtx", "trexall", "rheumatrex"],
+  "aine": ["antiinflamatorio no esteroideo", "ibuprofeno", "naproxeno", "diclofenaco"],
+  "prednisona": ["deltacortil", "prednisone", "cortisona"],
+  "certolizumab": ["cimzia"],
+  "infliximab": ["remicade"],
+  "leflunomida": ["arava"],
+  "anakinra": ["kineret"]
+};
+
+// Función para normalizar texto (elimina tildes y pasa a minúsculas)
+function normalizeText(text) {
+  return text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .trim();
+}
+
+// Función para extraer dosis y frecuencia del texto
+function extractDosageInfo(text, drugName) {
+  const normalizedText = normalizeText(text);
+  const drugPattern = new RegExp(`${normalizeText(drugName)}[^.]*?\\d+\\s*(?:mg|g|ml|mcg)[^.]*?(?:\\d+\\s*(?:veces|al día|diario|semanal|mensual))?`, 'gi');
+  const matches = normalizedText.match(drugPattern);
+  return matches || [];
+}
+
+// Función para analizar el texto y encontrar medicamentos
+function findDrugsInText(text) {
+  const normalizedText = normalizeText(text);
+  const foundDrugs = new Map();
+  
+  Object.keys(drugData).forEach(drug => {
+    const normalizedDrug = normalizeText(drug);
+    const synonyms = drugSynonyms[drug] || [];
+    const allNames = [drug, ...synonyms];
+    
+    allNames.forEach(name => {
+      const normalizedName = normalizeText(name);
+      if (normalizedText.includes(normalizedName)) {
+        const dosageInfo = extractDosageInfo(text, name);
+        foundDrugs.set(drug, {
+          originalName: name,
+          dosageInfo: dosageInfo
+        });
+      }
+    });
+  });
+  
+  return foundDrugs;
+}
+
+// Función para generar el resumen de compatibilidad
+function generateCompatibilityReport(foundDrugs, trimester) {
+  if (foundDrugs.size === 0) {
+    return {
+      title: "No se encontraron medicamentos",
+      details: "No se detectaron medicamentos en el documento."
+    };
+  }
+
+  const incompatibleDrugs = [];
+  const warningDrugs = [];
+  const compatibleDrugs = [];
+
+  foundDrugs.forEach((info, drug) => {
+    const drugInfo = {
+      name: drug,
+      originalName: info.originalName,
+      dosageInfo: info.dosageInfo,
+      status: drugData[drug][trimester],
+      notes: drugData[drug].notes
+    };
+
+    if (drugData[drug][trimester].includes("❌")) {
+      incompatibleDrugs.push(drugInfo);
+    } else if (drugData[drug][trimester].includes("⚠️")) {
+      warningDrugs.push(drugInfo);
+    } else {
+      compatibleDrugs.push(drugInfo);
+    }
+  });
+
+  return {
+    title: "Resumen de Compatibilidad",
+    details: {
+      incompatible: incompatibleDrugs,
+      warnings: warningDrugs,
+      compatible: compatibleDrugs
+    }
+  };
+}
+
+// Función para exportar el análisis a PDF
+async function exportToPDF(elementId, filename) {
+  const element = document.getElementById(elementId);
+  const canvas = await html2canvas(element);
+  const imgData = canvas.toDataURL('image/png');
+  
+  const pdf = new jsPDF('p', 'mm', 'a4');
+  const pdfWidth = pdf.internal.pageSize.getWidth();
+  const pdfHeight = pdf.internal.pageSize.getHeight();
+  const imgWidth = canvas.width;
+  const imgHeight = canvas.height;
+  const ratio = Math.min(pdfWidth / imgWidth, pdfHeight / imgHeight);
+  
+  pdf.addImage(imgData, 'PNG', 0, 0, imgWidth * ratio, imgHeight * ratio);
+  pdf.save(filename);
+}
+
+export default function DrugChecker() {
+  const [drug, setDrug] = useState("")
+  const [trimester, setTrimester] = useState("first")
+  const [pdfFile, setPdfFile] = useState(null)
+  const [analysisResult, setAnalysisResult] = useState(null)
+  const [isAnalyzing, setIsAnalyzing] = useState(false)
+  const [analysisHistory, setAnalysisHistory] = useState([])
+  const analysisRef = useRef(null)
+
+  // Memoize normalized drug data
+  const normalizedDrugData = useMemo(() => 
+    Object.fromEntries(
+      Object.entries(drugData).map(([key, value]) => [normalizeText(key), value])
+    ),
+    []
+  );
+
+  const normalizedDrug = normalizeText(drug);
+  const drugInfo = normalizedDrugData[normalizedDrug] || null;
+  const result = drugInfo ? drugInfo[trimester] : null;
+
+  // Lista de fármacos disponibles para autocompletado
+  const availableDrugs = Object.keys(drugData);
+
+  const handlePdfUpload = async (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    setIsAnalyzing(true);
+    setPdfFile(file);
+
+    try {
+      const arrayBuffer = await file.arrayBuffer();
+      const pdfData = await pdfParse(Buffer.from(arrayBuffer));
+      const foundDrugs = findDrugsInText(pdfData.text);
+      const report = generateCompatibilityReport(foundDrugs, trimester);
+      
+      // Añadir al historial
+      const newAnalysis = {
+        id: Date.now(),
+        date: new Date().toLocaleString(),
+        fileName: file.name,
+        report: report
+      };
+      
+      setAnalysisHistory(prev => [newAnalysis, ...prev]);
+      setAnalysisResult(report);
+    } catch (error) {
+      console.error('Error al analizar el PDF:', error);
+      setAnalysisResult({
+        title: "Error",
+        details: "Hubo un error al analizar el documento PDF."
+      });
+    } finally {
+      setIsAnalyzing(false);
+    }
+  };
+
+  const handleExportPDF = () => {
+    if (analysisRef.current) {
+      exportToPDF('analysis-result', `analisis-medicamentos-${new Date().toISOString().split('T')[0]}.pdf`);
+    }
+  };
+
+  return (
+    <div className="p-4 max-w-xl mx-auto">
+      <h1 className="text-xl font-bold mb-4">Compatibilidad de Fármacos en el Embarazo</h1>
+      
+      <div className="mb-4">
+        <label htmlFor="drug-input" className="block text-sm font-medium mb-1">
+          Nombre del fármaco
+        </label>
+        <Input 
+          id="drug-input"
+          placeholder="Introduce el nombre del fármaco" 
+          onChange={e => setDrug(e.target.value)} 
+          className="mb-2"
+          list="drug-list"
+          aria-label="Nombre del fármaco"
+        />
+        <datalist id="drug-list">
+          {availableDrugs.map(drug => (
+            <option key={drug} value={drug} />
+          ))}
+        </datalist>
+      </div>
+
+      <div className="mb-4">
+        <label htmlFor="trimester-select" className="block text-sm font-medium mb-1">
+          Trimestre
+        </label>
+        <Select 
+          onValueChange={setTrimester} 
+          defaultValue="first"
+          aria-label="Selecciona el trimestre"
+        >
+          <SelectTrigger id="trimester-select" className="mb-4">
+            <SelectValue placeholder="Selecciona el trimestre" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="first">1º Trimestre</SelectItem>
+            <SelectItem value="second">2º Trimestre</SelectItem>
+            <SelectItem value="third">3º Trimestre</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+
+      <div className="mb-4">
+        <label htmlFor="pdf-upload" className="block text-sm font-medium mb-1">
+          Cargar Historia Clínica (PDF)
+        </label>
+        <Input 
+          id="pdf-upload"
+          type="file"
+          accept=".pdf"
+          onChange={handlePdfUpload}
+          className="mb-2"
+          aria-label="Cargar archivo PDF"
+        />
+      </div>
+
+      {isAnalyzing && (
+        <div className="text-center p-4">
+          <p>Analizando documento...</p>
+        </div>
+      )}
+
+      {analysisResult && !isAnalyzing && (
+        <div id="analysis-result" ref={analysisRef}>
+          <Card className="mt-4">
+            <CardContent className="p-4">
+              <div className="flex justify-between items-center mb-4">
+                <h2 className="text-lg font-bold">{analysisResult.title}</h2>
+                <button
+                  onClick={handleExportPDF}
+                  className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
+                >
+                  Exportar PDF
+                </button>
+              </div>
+              
+              {analysisResult.details.incompatible?.length > 0 && (
+                <div className="mb-4">
+                  <h3 className="font-semibold text-red-600">Medicamentos No Compatibles:</h3>
+                  {analysisResult.details.incompatible.map(drug => (
+                    <div key={drug.name} className="ml-4 mt-2">
+                      <p className="font-medium">{drug.name}</p>
+                      <p className="text-red-600">{drug.status}</p>
+                      <p className="text-sm text-gray-600">{drug.notes}</p>
+                      {drug.dosageInfo.length > 0 && (
+                        <p className="text-sm text-gray-600">
+                          Dosis encontrada: {drug.dosageInfo.join(', ')}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {analysisResult.details.warnings?.length > 0 && (
+                <div className="mb-4">
+                  <h3 className="font-semibold text-yellow-600">Medicamentos con Advertencias:</h3>
+                  {analysisResult.details.warnings.map(drug => (
+                    <div key={drug.name} className="ml-4 mt-2">
+                      <p className="font-medium">{drug.name}</p>
+                      <p className="text-yellow-600">{drug.status}</p>
+                      <p className="text-sm text-gray-600">{drug.notes}</p>
+                      {drug.dosageInfo.length > 0 && (
+                        <p className="text-sm text-gray-600">
+                          Dosis encontrada: {drug.dosageInfo.join(', ')}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {analysisResult.details.compatible?.length > 0 && (
+                <div className="mb-4">
+                  <h3 className="font-semibold text-green-600">Medicamentos Compatibles:</h3>
+                  {analysisResult.details.compatible.map(drug => (
+                    <div key={drug.name} className="ml-4 mt-2">
+                      <p className="font-medium">{drug.name}</p>
+                      <p className="text-green-600">{drug.status}</p>
+                      <p className="text-sm text-gray-600">{drug.notes}</p>
+                      {drug.dosageInfo.length > 0 && (
+                        <p className="text-sm text-gray-600">
+                          Dosis encontrada: {drug.dosageInfo.join(', ')}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {/* Analysis History */}
+      {analysisHistory.length > 0 && (
+        <div className="mt-8">
+          <h2 className="text-lg font-bold mb-4">Historial de Análisis</h2>
+          <div className="space-y-4">
+            {analysisHistory.map(analysis => (
+              <Card key={analysis.id}>
+                <CardContent className="p-4">
+                  <div className="flex justify-between items-start">
+                    <div>
+                      <p className="font-medium">{analysis.fileName}</p>
+                      <p className="text-sm text-gray-600">{analysis.date}</p>
+                    </div>
+                    <button
+                      onClick={() => setAnalysisResult(analysis.report)}
+                      className="px-3 py-1 bg-gray-200 rounded hover:bg-gray-300"
+                    >
+                      Ver Detalles
+                    </button>
+                  </div>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {result && (
+        <Card>
+          <CardContent className="p-4">
+            <p className="text-lg font-medium">Resultado: {result}</p>
+            <p className="text-sm text-gray-600 mt-2">{drugInfo.notes}</p>
+          </CardContent>
+        </Card>
+      )}
+
+      {!result && drug && trimester && (
+        <div role="alert" className="text-red-600 mt-4">
+          Fármaco no encontrado o sin datos disponibles.
+        </div>
+      )}
+    </div>
+  )
+}
